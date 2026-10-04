@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>猫は流体</title>
+<title>猫は液体</title>
 
 <style>
 body{
@@ -29,8 +29,29 @@ h2{
 
 canvas{
     display:block;
+    max-width:calc(100vw - 20px);
+    height:auto;
     background:white;
     border:2px solid #444;
+}
+
+#tiltButton{
+    margin:8px 0;
+    padding:10px 18px;
+    border:0;
+    border-radius:20px;
+    background:#d9e8c6;
+    color:#35452a;
+    font-size:16px;
+    font-weight:bold;
+    cursor:pointer;
+}
+
+#tiltStatus{
+    min-height:1.4em;
+    margin:0 8px 8px;
+    color:#4a413b;
+    font-size:14px;
 }
 
 #startScreen{
@@ -110,12 +131,15 @@ canvas{
 </head>
 <body>
 
-<h2>猫は流体</h2>
+<h2>猫は液体</h2>
 
 <div id="info">
 テンキー1〜9 または WASDで重力方向変更<br>
-5キーで停止
+5キーで停止<br>
+スマホは傾きを使って重力を操作できます
 </div>
+<button id="tiltButton" type="button">傾き操作を有効にする</button>
+<p id="tiltStatus" aria-live="polite"></p>
 
 <div class="game-wrap">
 <canvas id="game" width="500" height="800"></canvas>
@@ -136,6 +160,9 @@ let gravityX = 0;
 let gravityY = 0.18;
 let animationTime = 0;
 let gameStarted = false;
+let tiltControlEnabled = false;
+let tiltBaseline = null;
+let tiltSensorTimeout = null;
 
 const SOFT_BODY_NODE_COUNT = 32;
 const SOFT_BODY_RADIUS_X = 40;
@@ -226,6 +253,92 @@ function setGravity(x,y){
     gravityY=y;
 }
 
+function handleDeviceOrientation(event){
+
+    if(
+        !tiltControlEnabled ||
+        !Number.isFinite(event.beta) ||
+        !Number.isFinite(event.gamma)
+    ){
+        return;
+    }
+
+    if(tiltSensorTimeout!==null){
+        clearTimeout(tiltSensorTimeout);
+        tiltSensorTimeout=null;
+    }
+
+    if(tiltBaseline===null){
+        tiltBaseline={beta:event.beta,gamma:event.gamma};
+        document.getElementById("tiltStatus").textContent=
+            "傾き操作中：端末を傾けてください";
+        return;
+    }
+
+    const betaDelta=event.beta-tiltBaseline.beta;
+    const gammaDelta=event.gamma-tiltBaseline.gamma;
+    const normalizedDelta=value=>Math.max(-1,Math.min(1,value/30));
+    setGravity(
+        normalizedDelta(gammaDelta)*0.20,
+        normalizedDelta(betaDelta)*0.20
+    );
+    document.getElementById("tiltStatus").textContent=
+        "傾き操作中：端末を傾けてください";
+}
+
+async function toggleTiltControl(){
+
+    const button=document.getElementById("tiltButton");
+    const status=document.getElementById("tiltStatus");
+
+    if(tiltControlEnabled){
+        tiltControlEnabled=false;
+        tiltBaseline=null;
+        clearTimeout(tiltSensorTimeout);
+        tiltSensorTimeout=null;
+        window.removeEventListener("deviceorientation",handleDeviceOrientation);
+        setGravity(0,0.18);
+        button.textContent="傾き操作を有効にする";
+        status.textContent="傾き操作を停止しました";
+        return;
+    }
+
+    if(typeof DeviceOrientationEvent==="undefined"){
+        status.textContent="この端末・ブラウザーは傾き操作に対応していません";
+        return;
+    }
+
+    if(!window.isSecureContext){
+        status.textContent="傾き操作にはHTTPS接続が必要です";
+        return;
+    }
+
+    try{
+        if(typeof DeviceOrientationEvent.requestPermission==="function"){
+            const permission=await DeviceOrientationEvent.requestPermission();
+            if(permission!=="granted"){
+                status.textContent="傾きセンサーの使用が許可されませんでした";
+                return;
+            }
+        }
+    }catch(error){
+        status.textContent="傾きセンサーを利用できませんでした";
+        return;
+    }
+
+    tiltControlEnabled=true;
+    tiltBaseline=null;
+    window.addEventListener("deviceorientation",handleDeviceOrientation);
+    button.textContent="傾き操作を停止する";
+    status.textContent="傾きセンサーに接続中です…";
+    tiltSensorTimeout=setTimeout(()=>{
+        if(tiltControlEnabled && tiltBaseline===null){
+            status.textContent=
+                "傾きセンサーから値を取得できません。対応端末・ブラウザーをご確認ください";
+        }
+    },2500);
+}
+
 function startGame(){
 
     if(gameStarted){
@@ -266,6 +379,7 @@ function replayGame(){
 document.getElementById("startButton").addEventListener("click",startGame);
 document.getElementById("replayButton").addEventListener("click",replayGame);
 document.getElementById("resetButton").addEventListener("click",resetGame);
+document.getElementById("tiltButton").addEventListener("click",toggleTiltControl);
 canvas.addEventListener("pointerdown",startGame);
 window.addEventListener("keydown",(e)=>{
     if(!gameStarted && (e.code==="Enter" || e.code==="Space")){
