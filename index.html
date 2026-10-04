@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>猫は流体</title>
+
+<style>
+body{
+    margin:0;
+    background:#ececec;
+    font-family:sans-serif;
+    text-align:center;
+}
+
+h2{
+    margin:8px;
+}
+
+#info{
+    margin-bottom:10px;
+}
+
+.game-wrap{
+    position:relative;
+    display:inline-block;
+    vertical-align:top;
+}
+
+canvas{
+    display:block;
+    background:white;
+    border:2px solid #444;
+}
+
+#startScreen{
+    position:absolute;
+    inset:2px;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    gap:14px;
+    background:rgba(255,255,255,0.24);
+}
+
+#startScreen p{
+    margin:0;
+    padding:8px 12px;
+    border-radius:12px;
+    background:rgba(255,255,255,0.86);
+    color:#684628;
+    font-size:18px;
+}
+
+#startScreen[hidden]{
+    display:none;
+}
+
+#startButton{
+    padding:12px 30px;
+    border:0;
+    border-radius:24px;
+    background:#ffb347;
+    color:#51351e;
+    font-size:20px;
+    font-weight:bold;
+    cursor:pointer;
+    box-shadow:0 3px 0 #d99035;
+}
+
+#startButton:active{
+    transform:translateY(2px);
+    box-shadow:0 1px 0 #d99035;
+}
+
+#replayButton{
+    margin:12px 0 20px;
+    padding:11px 26px;
+    border:0;
+    border-radius:22px;
+    background:#ffb347;
+    color:#51351e;
+    font-size:18px;
+    font-weight:bold;
+    cursor:pointer;
+    box-shadow:0 3px 0 #d99035;
+}
+
+#replayButton[hidden]{
+    display:none;
+}
+
+#resetButton{
+    margin:12px 8px 20px;
+    padding:11px 26px;
+    border:0;
+    border-radius:22px;
+    background:#e5e0dc;
+    color:#4a413b;
+    font-size:18px;
+    font-weight:bold;
+    cursor:pointer;
+}
+
+#resetButton[hidden]{
+    display:none;
+}
+</style>
+</head>
+<body>
+
+<h2>猫は流体</h2>
+
+<div id="info">
+テンキー1〜9 または WASDで重力方向変更<br>
+5キーで停止
+</div>
+
+<div class="game-wrap">
+<canvas id="game" width="500" height="800"></canvas>
+<div id="startScreen">
+    <p>ぷにぷにの猫を箱まで運ぼう</p>
+    <button id="startButton" type="button">あそぶ</button>
+</div>
+</div>
+<button id="replayButton" type="button" hidden>もう一度遊ぶ</button>
+<button id="resetButton" type="button" hidden>リセット</button>
+
+<script>
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+let gravityX = 0;
+let gravityY = 0.18;
+let animationTime = 0;
+let gameStarted = false;
+
+const SOFT_BODY_NODE_COUNT = 32;
+const SOFT_BODY_RADIUS_X = 40;
+const SOFT_BODY_RADIUS_Y = 40;
+const SOFT_BODY_NODE_RADIUS = 3;
+const BOX_OPENING_WIDTH = 90;
+
+const box = {
+    x:170,
+    y:690,
+    w:160,
+    h:90
+};
+
+const obstacles = [
+
+    {x:35,y:220,w:310,h:18},
+    {x:35,y:220,w:18,h:105},
+    {x:155,y:360,w:310,h:18},
+    {x:447,y:360,w:18,h:105},
+    {x:35,y:565,w:310,h:18},
+    {x:327,y:470,w:18,h:113}
+
+];
+
+const cats = [
+
+    {
+        x:250,
+        y:110,
+        vx:0,
+        vy:0,
+        color:"#17151b",
+        stored:false,
+        squeeze:0,
+        phase:0,
+        particles:[],
+        restArea:0,
+        containedSince:null,
+        clear:false
+    }
+];
+
+function initializeSoftBody(cat){
+
+    for(let i=0;i<SOFT_BODY_NODE_COUNT;i++){
+        const angle=i*Math.PI*2/SOFT_BODY_NODE_COUNT;
+        const leftEar=Math.exp(-Math.pow((angle-3.95)/0.2,2))*0.19;
+        const rightEar=Math.exp(-Math.pow((angle-5.48)/0.2,2))*0.19;
+        const radius=1+leftEar+rightEar;
+        cat.particles.push({
+            x:cat.x+Math.cos(angle)*SOFT_BODY_RADIUS_X*radius,
+            y:cat.y+Math.sin(angle)*SOFT_BODY_RADIUS_Y*radius,
+            vx:0,
+            vy:0
+        });
+    }
+
+    cat.restLengths=cat.particles.map((particle,i)=>{
+        const next=cat.particles[(i+1)%SOFT_BODY_NODE_COUNT];
+        return Math.hypot(next.x-particle.x,next.y-particle.y);
+    });
+    cat.restDiagonals=cat.particles.map((particle,i)=>{
+        const next=cat.particles[(i+2)%SOFT_BODY_NODE_COUNT];
+        return Math.hypot(next.x-particle.x,next.y-particle.y);
+    });
+    cat.restOffsets=cat.particles.map(particle=>({
+        x:particle.x-cat.x,
+        y:particle.y-cat.y
+    }));
+    cat.restArea=polygonArea(cat.particles);
+}
+
+function polygonArea(particles){
+
+    let area=0;
+    particles.forEach((particle,i)=>{
+        const next=particles[(i+1)%particles.length];
+        area+=particle.x*next.y-next.x*particle.y;
+    });
+    return area*0.5;
+}
+
+cats.forEach(initializeSoftBody);
+
+function setGravity(x,y){
+    gravityX=x;
+    gravityY=y;
+}
+
+function startGame(){
+
+    if(gameStarted){
+        return;
+    }
+
+    gameStarted=true;
+    document.getElementById("startScreen").hidden=true;
+    document.getElementById("resetButton").hidden=false;
+}
+
+function resetGame(){
+
+    const cat=cats[0];
+    cat.x=250;
+    cat.y=110;
+    cat.vx=0;
+    cat.vy=0;
+    cat.stored=false;
+    cat.squeeze=0;
+    cat.containedSince=null;
+    cat.clear=false;
+    cat.particles=[];
+    initializeSoftBody(cat);
+    gravityX=0;
+    gravityY=0.18;
+    document.getElementById("replayButton").hidden=true;
+    document.getElementById("resetButton").hidden=false;
+}
+
+function replayGame(){
+
+    resetGame();
+    gameStarted=true;
+    document.getElementById("startScreen").hidden=true;
+}
+
+document.getElementById("startButton").addEventListener("click",startGame);
+document.getElementById("replayButton").addEventListener("click",replayGame);
+document.getElementById("resetButton").addEventListener("click",resetGame);
+canvas.addEventListener("pointerdown",startGame);
+window.addEventListener("keydown",(e)=>{
+    if(!gameStarted && (e.code==="Enter" || e.code==="Space")){
+        startGame();
+        return;
+    }
+});
+
+window.addEventListener("keydown",(e)=>{
+
+    switch(e.code){
+
+        case "Numpad7":
+            setGravity(-0.15,-0.15);
+            break;
+
+        case "Numpad8":
+            setGravity(0,-0.20);
+            break;
+
+        case "Numpad9":
+            setGravity(0.15,-0.15);
+            break;
+
+        case "Numpad4":
+            setGravity(-0.20,0);
+            break;
+
+        case "Numpad5":
+        case "Digit5":
+            setGravity(0,0);
+            break;
+
+        case "Numpad6":
+            setGravity(0.20,0);
+            break;
+
+        case "Numpad1":
+            setGravity(-0.15,0.15);
+            break;
+
+        case "Numpad2":
+            setGravity(0,0.20);
+            break;
+
+        case "Numpad3":
+            setGravity(0.15,0.15);
+            break;
+
+        case "KeyA":
+            setGravity(-0.20,0);
+            break;
+
+        case "KeyD":
+            setGravity(0.20,0);
+            break;
+
+        case "KeyW":
+            setGravity(0,-0.20);
+            break;
+
+        case "KeyS":
+            setGravity(0,0.20);
+            break;
+    }
+});
+
+function boxSolids(){
+
+    const openingLeft=box.x+(box.w-BOX_OPENING_WIDTH)/2;
+    const openingRight=openingLeft+BOX_OPENING_WIDTH;
+    const wall=10;
+
+    return [
+        {x:box.x,y:box.y,w:wall,h:box.h},
+        {x:box.x+box.w-wall,y:box.y,w:wall,h:box.h},
+        {x:box.x,y:box.y+box.h-wall,w:box.w,h:wall},
+        {x:box.x,y:box.y,w:openingLeft-box.x,h:wall},
+        {x:openingRight,y:box.y,w:box.x+box.w-openingRight,h:wall}
+    ];
+}
+
+function resolveParticleCollision(particle,obstacle){
+
+    const closestX=Math.max(obstacle.x,Math.min(particle.x,obstacle.x+obstacle.w));
+    const closestY=Math.max(obstacle.y,Math.min(particle.y,obstacle.y+obstacle.h));
+    let dx=particle.x-closestX;
+    let dy=particle.y-closestY;
+    let distance=Math.hypot(dx,dy);
+    let penetration;
+
+    if(distance>=SOFT_BODY_NODE_RADIUS){
+        return;
+    }
+
+    if(distance===0){
+        const faces=[
+            {distance:particle.x-obstacle.x,x:-1,y:0},
+            {distance:obstacle.x+obstacle.w-particle.x,x:1,y:0},
+            {distance:particle.y-obstacle.y,x:0,y:-1},
+            {distance:obstacle.y+obstacle.h-particle.y,x:0,y:1}
+        ];
+        const nearest=faces.reduce((a,b)=>b.distance<a.distance ? b : a);
+        dx=nearest.x;
+        dy=nearest.y;
+        distance=0;
+        penetration=nearest.distance+SOFT_BODY_NODE_RADIUS;
+    }else{
+        penetration=SOFT_BODY_NODE_RADIUS-distance;
+    }
+
+    let normalX;
+    let normalY;
+    if(distance===0){
+        normalX=dx;
+        normalY=dy;
+    }else{
+        normalX=dx/distance;
+        normalY=dy/distance;
+    }
+
+    particle.x+=normalX*penetration;
+    particle.y+=normalY*penetration;
+    const velocityIntoSurface=particle.vx*normalX+particle.vy*normalY;
+    if(velocityIntoSurface<0){
+        particle.vx-=normalX*velocityIntoSurface*1.15;
+        particle.vy-=normalY*velocityIntoSurface*1.15;
+    }
+}
+
+function resolveBodyObstacleOverlaps(particles,obstacles){
+
+    const minX=Math.min(...particles.map(particle=>particle.x));
+    const maxX=Math.max(...particles.map(particle=>particle.x));
+    const minY=Math.min(...particles.map(particle=>particle.y));
+    const maxY=Math.max(...particles.map(particle=>particle.y));
+    const candidates=[];
+
+    obstacles.forEach(obstacle=>{
+        const left=obstacle.x-SOFT_BODY_NODE_RADIUS;
+        const right=obstacle.x+obstacle.w+SOFT_BODY_NODE_RADIUS;
+        const top=obstacle.y-SOFT_BODY_NODE_RADIUS;
+        const bottom=obstacle.y+obstacle.h+SOFT_BODY_NODE_RADIUS;
+
+        if(minX>=right || maxX<=left || minY>=bottom || maxY<=top){
+            return;
+        }
+
+        candidates.push(
+            {shift:left-maxX,normalX:-1,normalY:0},
+            {shift:right-minX,normalX:1,normalY:0},
+            {shift:top-maxY,normalX:0,normalY:-1},
+            {shift:bottom-minY,normalX:0,normalY:1}
+        );
+    });
+
+    if(candidates.length===0){
+        return;
+    }
+
+    const separation=candidates.reduce((nearest,candidate)=>
+        Math.abs(candidate.shift)<Math.abs(nearest.shift)
+            ? candidate
+            : nearest
+    );
+    const shift=separation.shift;
+
+    particles.forEach(particle=>{
+        if(separation.normalX!==0){
+            particle.x+=shift;
+        }else{
+            particle.y+=shift;
+        }
+
+        const velocityIntoSurface=
+            particle.vx*separation.normalX+
+            particle.vy*separation.normalY;
+        if(velocityIntoSurface<0){
+            particle.vx-=separation.normalX*velocityIntoSurface;
+            particle.vy-=separation.normalY*velocityIntoSurface;
+        }
+    });
+}
+
+function keepSoftBodyOnScreen(particles){
+
+    const minX=Math.min(...particles.map(particle=>particle.x));
+    const maxX=Math.max(...particles.map(particle=>particle.x));
+    const minY=Math.min(...particles.map(particle=>particle.y));
+    const maxY=Math.max(...particles.map(particle=>particle.y));
+    const shiftX=minX<SOFT_BODY_NODE_RADIUS
+        ? SOFT_BODY_NODE_RADIUS-minX
+        : (maxX>canvas.width-SOFT_BODY_NODE_RADIUS
+            ? canvas.width-SOFT_BODY_NODE_RADIUS-maxX
+            : 0);
+    const shiftY=minY<SOFT_BODY_NODE_RADIUS
+        ? SOFT_BODY_NODE_RADIUS-minY
+        : (maxY>canvas.height-SOFT_BODY_NODE_RADIUS
+            ? canvas.height-SOFT_BODY_NODE_RADIUS-maxY
+            : 0);
+
+    particles.forEach(particle=>{
+        particle.x+=shiftX;
+        particle.y+=shiftY;
+        if(shiftX!==0 && particle.vx*shiftX<0){
+            particle.vx*=-0.35;
+        }
+        if(shiftY!==0 && particle.vy*shiftY<0){
+            particle.vy*=-0.35;
+        }
+    });
+}
+
+function drawBox(){
+
+    ctx.fillStyle="white";
+    ctx.fillRect(
+        box.x+12,
+        box.y+12,
+        box.w-24,
+        box.h-24
+    );
+
+    ctx.fillStyle="#a16c34";
+    boxSolids().forEach(wall=>{
+        ctx.fillRect(wall.x,wall.y,wall.w,wall.h);
+    });
+}
+
+function drawObstacles(){
+
+    ctx.fillStyle="#5c5c5c";
+
+    obstacles.forEach(o=>{
+
+        ctx.fillRect(
+            o.x,
+            o.y,
+            o.w,
+            o.h
+        );
+
+    });
+}
+
+function drawCat(cat){
+
+    const scaleX=1-cat.squeeze*0.2;
+    const scaleY=1+cat.squeeze*0.25;
+    const points=cat.particles.map(particle=>({
+        x:particle.x-cat.x,
+        y:particle.y-cat.y
+    }));
+
+    ctx.save();
+
+    ctx.translate(
+        cat.x,
+        cat.y
+    );
+
+    ctx.scale(
+        scaleX,
+        scaleY
+    );
+
+    ctx.fillStyle=cat.color;
+    ctx.beginPath();
+    const first=points[0];
+    const last=points[points.length-1];
+    ctx.moveTo((last.x+first.x)/2,(last.y+first.y)/2);
+    points.forEach((point,i)=>{
+        const next=points[(i+1)%points.length];
+        ctx.quadraticCurveTo(
+            point.x,point.y,
+            (point.x+next.x)/2,
+            (point.y+next.y)/2
+        );
+    });
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle="#08080a";
+    ctx.lineWidth=1.5;
+    ctx.lineJoin="round";
+    ctx.beginPath();
+    ctx.moveTo(-30,-21);
+    ctx.lineTo(-23,-34);
+    ctx.quadraticCurveTo(-17,-32,-13,-20);
+    ctx.moveTo(30,-21);
+    ctx.lineTo(23,-34);
+    ctx.quadraticCurveTo(17,-32,13,-20);
+    ctx.stroke();
+
+    ctx.fillStyle="#b77d91";
+    ctx.beginPath();
+    ctx.moveTo(-27,-23);
+    ctx.lineTo(-23,-31);
+    ctx.quadraticCurveTo(-19,-29,-17,-22);
+    ctx.closePath();
+    ctx.moveTo(27,-23);
+    ctx.lineTo(23,-31);
+    ctx.quadraticCurveTo(19,-29,17,-22);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle="#f0d982";
+    ctx.beginPath();
+    ctx.ellipse(-9,0,2,2.6,0,0,Math.PI*2);
+    ctx.ellipse(9,0,2,2.6,0,0,Math.PI*2);
+    ctx.fill();
+
+    ctx.fillStyle="#d8899a";
+    ctx.beginPath();
+    ctx.moveTo(0,3);
+    ctx.lineTo(-2,5);
+    ctx.quadraticCurveTo(0,7,2,5);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle="#d7d1d8";
+    ctx.lineWidth=0.8;
+    ctx.lineCap="round";
+    ctx.beginPath();
+    ctx.moveTo(-13,5);
+    ctx.lineTo(-26,2);
+    ctx.moveTo(-13,8);
+    ctx.lineTo(-27,8);
+    ctx.moveTo(-13,11);
+    ctx.lineTo(-25,15);
+    ctx.moveTo(13,5);
+    ctx.lineTo(26,2);
+    ctx.moveTo(13,8);
+    ctx.lineTo(27,8);
+    ctx.moveTo(13,11);
+    ctx.lineTo(25,15);
+    ctx.stroke();
+
+    ctx.restore();
+}
+
+function updateCats(){
+
+    let storedCount = 0;
+
+    cats.forEach(cat=>{
+
+        updateSoftBody(cat);
+
+        const inner={
+            left:box.x+10+SOFT_BODY_NODE_RADIUS,
+            right:box.x+box.w-10-SOFT_BODY_NODE_RADIUS,
+            top:box.y+10+SOFT_BODY_NODE_RADIUS,
+            bottom:box.y+box.h-10-SOFT_BODY_NODE_RADIUS
+        };
+        const entirelyInside=cat.particles.every(particle=>
+            particle.x>=inner.left &&
+            particle.x<=inner.right &&
+            particle.y>=inner.top &&
+            particle.y<=inner.bottom
+        );
+
+        cat.stored=entirelyInside;
+        if(entirelyInside){
+            if(cat.containedSince===null){
+                cat.containedSince=performance.now();
+            }
+        }else{
+            cat.containedSince=null;
+        }
+
+        if(
+            !cat.clear &&
+            cat.containedSince!==null &&
+            performance.now()-cat.containedSince>=5000
+        ){
+            cat.clear=true;
+            document.getElementById("replayButton").hidden=false;
+        }
+
+        if(cat.stored){
+            storedCount++;
+        }
+
+        drawCat(cat);
+
+    });
+
+    return storedCount;
+}
+
+function updateSoftBody(cat){
+
+    const particles=cat.particles;
+    const count=particles.length;
+    const area=polygonArea(particles);
+    const areaError=(cat.restArea-area)/cat.restArea;
+    const accelerations=particles.map(()=>({x:gravityX,y:gravityY}));
+    const centerX=particles.reduce((sum,p)=>sum+p.x,0)/count;
+    const centerY=particles.reduce((sum,p)=>sum+p.y,0)/count;
+    const centerVx=particles.reduce((sum,p)=>sum+p.vx,0)/count;
+    const centerVy=particles.reduce((sum,p)=>sum+p.vy,0)/count;
+    const shapeStiffness=0.018;
+
+    for(let i=0;i<count;i++){
+        const particle=particles[i];
+        const restOffset=cat.restOffsets[i];
+        accelerations[i].x+=
+            (centerX+restOffset.x-particle.x)*shapeStiffness-
+            (particle.vx-centerVx)*0.035;
+        accelerations[i].y+=
+            (centerY+restOffset.y-particle.y)*shapeStiffness-
+            (particle.vy-centerVy)*0.035;
+
+        for(const offset of [1,2]){
+            const j=(i+offset)%count;
+            const first=particles[i];
+            const second=particles[j];
+            const dx=second.x-first.x;
+            const dy=second.y-first.y;
+            const distance=Math.hypot(dx,dy);
+            if(distance===0) continue;
+
+            const restLength=offset===1
+                ? cat.restLengths[i]
+                : cat.restDiagonals[i];
+            const relativeSpeed=
+                (second.vx-first.vx)*dx/distance+
+                (second.vy-first.vy)*dy/distance;
+            const force=(distance-restLength)*0.035+relativeSpeed*0.12;
+            const forceX=force*dx/distance;
+            const forceY=force*dy/distance;
+            accelerations[i].x+=forceX;
+            accelerations[i].y+=forceY;
+            accelerations[j].x-=forceX;
+            accelerations[j].y-=forceY;
+        }
+
+        const previous=particles[(i+count-1)%count];
+        const next=particles[(i+1)%count];
+        const gradientX=(next.y-previous.y)*0.5;
+        const gradientY=(previous.x-next.x)*0.5;
+        accelerations[i].x+=gradientX*areaError*0.06;
+        accelerations[i].y+=gradientY*areaError*0.06;
+    }
+
+    const maxSpeed=Math.max(...particles.map(p=>
+        Math.max(Math.abs(p.vx),Math.abs(p.vy))
+    ));
+    const steps=Math.max(1,Math.ceil(maxSpeed/4));
+
+    particles.forEach((particle,i)=>{
+        particle.vx=(particle.vx+accelerations[i].x)*0.992;
+        particle.vy=(particle.vy+accelerations[i].y)*0.992;
+    });
+
+    const solids=obstacles.concat(boxSolids());
+    for(let step=0;step<steps;step++){
+        particles.forEach(particle=>{
+            particle.x+=particle.vx/steps;
+            particle.y+=particle.vy/steps;
+
+            solids.forEach(obstacle=>
+                resolveParticleCollision(particle,obstacle)
+            );
+
+            if(particle.x<SOFT_BODY_NODE_RADIUS){
+                particle.x=SOFT_BODY_NODE_RADIUS;
+                if(particle.vx<0) particle.vx*=-0.35;
+            }
+            if(particle.x>canvas.width-SOFT_BODY_NODE_RADIUS){
+                particle.x=canvas.width-SOFT_BODY_NODE_RADIUS;
+                if(particle.vx>0) particle.vx*=-0.35;
+            }
+            if(particle.y<SOFT_BODY_NODE_RADIUS){
+                particle.y=SOFT_BODY_NODE_RADIUS;
+                if(particle.vy<0) particle.vy*=-0.35;
+            }
+            if(particle.y>canvas.height-SOFT_BODY_NODE_RADIUS){
+                particle.y=canvas.height-SOFT_BODY_NODE_RADIUS;
+                if(particle.vy>0) particle.vy*=-0.35;
+            }
+        });
+
+        resolveBodyObstacleOverlaps(particles,solids);
+        keepSoftBodyOnScreen(particles);
+    }
+
+    cat.x=particles.reduce((sum,p)=>sum+p.x,0)/count;
+    cat.y=particles.reduce((sum,p)=>sum+p.y,0)/count;
+    cat.vx=particles.reduce((sum,p)=>sum+p.vx,0)/count;
+    cat.vy=particles.reduce((sum,p)=>sum+p.vy,0)/count;
+}
+
+function drawHud(count){
+
+    if(count<cats.length){
+        ctx.fillStyle="#684628";
+        ctx.font="18px sans-serif";
+        ctx.fillText("猫を箱の開口部まで運ぼう",20,30);
+    }else if(cats.every(cat=>cat.clear)){
+
+        ctx.fillStyle="green";
+
+        ctx.font="48px sans-serif";
+
+        ctx.fillText(
+            "CLEAR!",
+            150,
+            60
+        );
+    }else{
+        ctx.fillStyle="#8b5e34";
+        ctx.font="20px sans-serif";
+        ctx.fillText("判定中…",20,35);
+    }
+}
+
+function gameLoop(){
+
+    animationTime++;
+
+    ctx.clearRect(
+        0,
+        0,
+        canvas.width,
+        canvas.height
+    );
+
+    drawBox();
+    drawObstacles();
+
+    let storedCount=0;
+    if(gameStarted){
+        storedCount=updateCats();
+    }else{
+        cats.forEach(drawCat);
+    }
+
+    if(gameStarted){
+        drawHud(storedCount);
+    }
+
+    requestAnimationFrame(
+        gameLoop
+    );
+}
+
+gameLoop();
+
+</script>
+
+</body>
+</html>
